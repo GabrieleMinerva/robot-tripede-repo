@@ -200,3 +200,60 @@ Build a minimal Android app that:
 8. calls a mocked AI service first;
 9. later swaps mocked AI with OpenAI API;
 10. never sends raw camera/video by default.
+
+## Current development focus - Live Robot mode
+
+The current development phase focuses on the Android app only.
+
+Available hardware:
+
+- Samsung Galaxy S20 only.
+
+Not available yet:
+
+- ESP32.
+- BLE hardware.
+- IMU.
+- Physical STOP button.
+- Motors.
+- Robot legs.
+
+Codex must prioritize the Live Robot feature:
+
+- local camera preview;
+- mock conversation;
+- local memory;
+- manual person profiles;
+- privacy and consent screens;
+- no external API call in the first milestone;
+- no face recognition implementation yet;
+- no voice identification implementation yet;
+- no continuous video/audio upload.
+
+The first implementation must be local-first and privacy-safe.
+
+## Robot identity and backup
+
+The robot must be treated as a persistent local identity.
+
+The app must support exporting and importing the robot identity as a complete backup.
+
+This backup represents the robot's persistent memory/personality state, not real consciousness.
+
+The backup must include:
+
+- robot profile;
+- robotId;
+- personality;
+- persons;
+- conversations;
+- preferences;
+- relationships;
+- privacy settings;
+- evolution log.
+
+Backups must be local-first, user-controlled and optionally encrypted.
+
+No automatic cloud sync.
+
+No biometric export in the first implementation.
