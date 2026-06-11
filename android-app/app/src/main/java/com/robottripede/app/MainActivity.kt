@@ -217,10 +217,7 @@ class MainActivity : ComponentActivity() {
                     liveCameraMessage = "Preview camera non disponibile: $message"
                     toast("Preview camera non disponibile")
                 }
-            }.apply {
-                setBackgroundColor(Color.BLACK)
-                post { startPreview() }
-            }
+            }.apply { post { startPreview() } }
             content.addView(liveCamera, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 520))
         }
 
