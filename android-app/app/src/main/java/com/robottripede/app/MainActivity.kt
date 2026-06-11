@@ -48,6 +48,7 @@ class MainActivity : ComponentActivity() {
     private var liveCamera: CameraPreviewView? = null
     private var liveState = LiveRobotState.IDLE
     private var liveCameraMessage: String? = null
+    private var livePreviewEnabled = false
     private val liveTransientMessages = mutableListOf<Pair<String, String>>()
 
     private lateinit var bleStatus: TextView
@@ -62,12 +63,14 @@ class MainActivity : ComponentActivity() {
     private val cameraPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) {
             liveState = LiveRobotState.CAMERA_READY
-            liveCamera?.startPreview()
+            livePreviewEnabled = false
+            liveCameraMessage = "Camera autorizzata. Avvia la preview solo quando vuoi usarla."
         } else {
             liveState = LiveRobotState.PRIVACY_BLOCKED
+            livePreviewEnabled = false
             toast("Camera non autorizzata: preview locale bloccata")
         }
-        setContentView(buildLiveRobotScreen())
+        showLiveRobotScreen()
     }
 
     private val exportBackupLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
@@ -107,6 +110,7 @@ class MainActivity : ComponentActivity() {
     private fun buildDashboard(): View {
         liveCamera?.stopPreview()
         liveCamera = null
+        livePreviewEnabled = false
         val content = baseContent()
 
         content.addView(title("Robot Tripede"))
@@ -158,10 +162,12 @@ class MainActivity : ComponentActivity() {
     private fun openLiveRobot() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             liveState = LiveRobotState.CAMERA_READY
-            liveCameraMessage = null
-            setContentView(buildLiveRobotScreen())
+            livePreviewEnabled = false
+            liveCameraMessage = "Preview camera non avviata. La schermata Live funziona anche senza camera."
+            showLiveRobotScreen()
         } else {
             liveState = LiveRobotState.PRIVACY_BLOCKED
+            livePreviewEnabled = false
             cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
         }
     }
@@ -179,7 +185,7 @@ class MainActivity : ComponentActivity() {
                 }
                 currentConversationId = null
                 liveState = LiveRobotState.IDLE
-                setContentView(buildLiveRobotScreen())
+                showLiveRobotScreen()
             },
         ))
 
@@ -187,6 +193,19 @@ class MainActivity : ComponentActivity() {
         if (liveState == LiveRobotState.PRIVACY_BLOCKED) {
             content.addView(body("Preview bloccata: autorizza la camera per usarla localmente. Nessuna immagine viene inviata all'esterno."))
             content.addView(button("Autorizza camera") { cameraPermissionLauncher.launch(Manifest.permission.CAMERA) })
+        } else if (!livePreviewEnabled) {
+            content.addView(body(liveCameraMessage ?: "Preview camera spenta. Nessuna immagine viene inviata all'esterno."))
+            content.addView(button("Avvia preview camera") {
+                if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                    livePreviewEnabled = true
+                    liveState = LiveRobotState.CAMERA_READY
+                    liveCameraMessage = null
+                    showLiveRobotScreen()
+                } else {
+                    liveState = LiveRobotState.PRIVACY_BLOCKED
+                    cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                }
+            })
         } else {
             liveCameraMessage?.let { message ->
                 content.addView(body(message))
@@ -194,6 +213,7 @@ class MainActivity : ComponentActivity() {
             liveCamera = CameraPreviewView(this) { message ->
                 runOnUiThread {
                     liveState = LiveRobotState.ERROR
+                    livePreviewEnabled = false
                     liveCameraMessage = "Preview camera non disponibile: $message"
                     toast("Preview camera non disponibile")
                 }
@@ -222,11 +242,11 @@ class MainActivity : ComponentActivity() {
                 }
                 val person = memoryRepository.createPerson(personNameInput.text.toString())
                 selectedPersonId = person.id
-                setContentView(buildLiveRobotScreen())
+                showLiveRobotScreen()
             },
             button("Seleziona ultima") {
                 selectedPersonId = memoryRepository.loadSnapshot().persons.lastOrNull()?.id
-                setContentView(buildLiveRobotScreen())
+                showLiveRobotScreen()
             },
         ))
 
@@ -291,12 +311,43 @@ class MainActivity : ComponentActivity() {
             liveTransientMessages += "robot" to response.assistantText
         }
         liveState = LiveRobotState.SPEAKING
-        setContentView(buildLiveRobotScreen())
+        showLiveRobotScreen()
+    }
+
+    private fun showLiveRobotScreen() {
+        try {
+            setContentView(buildLiveRobotScreen())
+        } catch (exception: Exception) {
+            liveCamera?.stopPreview()
+            liveCamera = null
+            livePreviewEnabled = false
+            liveState = LiveRobotState.ERROR
+            liveCameraMessage = exception.message ?: "Errore apertura Live Robot"
+            setContentView(buildLiveRobotErrorScreen(liveCameraMessage.orEmpty()))
+        }
+    }
+
+    private fun buildLiveRobotErrorScreen(message: String): View {
+        val content = baseContent()
+        content.addView(title("Live Robot"))
+        content.addView(section("Errore"))
+        content.addView(body("La schermata Live non si e aperta correttamente: $message"))
+        content.addView(body("Camera e microfono restano spenti. Nessun dato viene inviato all'esterno."))
+        content.addView(horizontalButtons(
+            button("Dashboard") { setContentView(buildDashboard()) },
+            button("Riprova senza camera") {
+                livePreviewEnabled = false
+                liveCameraMessage = "Riprovo con preview camera spenta."
+                showLiveRobotScreen()
+            },
+        ))
+        return scroll(content)
     }
 
     private fun buildMemoryScreen(): View {
         liveCamera?.stopPreview()
         liveCamera = null
+        livePreviewEnabled = false
         val snapshot = memoryRepository.loadSnapshot()
         val content = baseContent()
         content.addView(title("Memoria e identita"))
@@ -374,6 +425,7 @@ class MainActivity : ComponentActivity() {
     private fun buildPrivacyScreen(): View {
         liveCamera?.stopPreview()
         liveCamera = null
+        livePreviewEnabled = false
         val settings = memoryRepository.loadSnapshot().privacySettings
         val content = baseContent()
         content.addView(title("Privacy"))
