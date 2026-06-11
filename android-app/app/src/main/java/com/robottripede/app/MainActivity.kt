@@ -1,26 +1,53 @@
 package com.robottripede.app
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.core.content.ContextCompat
 import androidx.core.view.setPadding
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
+import com.robottripede.app.data.ai.MockAiConversationClient
+import com.robottripede.app.data.camera.CameraPreviewView
+import com.robottripede.app.data.local.LocalRobotMemoryRepository
+import com.robottripede.app.data.local.RobotIdentityBackupManager
 import com.robottripede.app.data.model.LedColor
 import com.robottripede.app.data.model.LedMode
+import com.robottripede.app.domain.ai.AiConversationRequest
+import com.robottripede.app.domain.live.LiveRobotState
+import com.robottripede.app.domain.memory.PrivacySettings
+import com.robottripede.app.domain.memory.RobotMemoryRepository
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class MainActivity : ComponentActivity() {
     private val viewModel: RobotDashboardViewModel by viewModels()
+
+    private lateinit var memoryRepository: RobotMemoryRepository
+    private lateinit var backupManager: RobotIdentityBackupManager
+    private val aiConversationClient = MockAiConversationClient()
+
+    private var selectedPersonId: String? = null
+    private var currentConversationId: String? = null
+    private var liveCamera: CameraPreviewView? = null
+    private var liveState = LiveRobotState.IDLE
+    private val liveTransientMessages = mutableListOf<Pair<String, String>>()
 
     private lateinit var bleStatus: TextView
     private lateinit var stopStatus: TextView
@@ -31,9 +58,38 @@ class MainActivity : ComponentActivity() {
     private lateinit var validationStatus: TextView
     private lateinit var commandInput: EditText
 
+    private val cameraPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            liveState = LiveRobotState.CAMERA_READY
+            liveCamera?.startPreview()
+        } else {
+            liveState = LiveRobotState.PRIVACY_BLOCKED
+            toast("Camera non autorizzata: preview locale bloccata")
+        }
+        setContentView(buildLiveRobotScreen())
+    }
+
+    private val exportBackupLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
+        if (uri != null) {
+            contentResolver.openOutputStream(uri)?.use(backupManager::exportBackup)
+            toast("Backup .robotbackup esportato")
+            setContentView(buildMemoryScreen())
+        }
+    }
+
+    private val importBackupLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            contentResolver.openInputStream(uri)?.use(backupManager::importBackup)
+            toast("Backup importato in modalita replace")
+            setContentView(buildMemoryScreen())
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContentView(buildContent())
+        memoryRepository = LocalRobotMemoryRepository(this)
+        backupManager = RobotIdentityBackupManager(memoryRepository)
+        setContentView(buildDashboard())
 
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
@@ -42,14 +98,23 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun buildContent(): View {
-        val content = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(32)
-            setBackgroundColor(Color.rgb(247, 248, 250))
-        }
+    override fun onDestroy() {
+        liveCamera?.stopPreview()
+        super.onDestroy()
+    }
+
+    private fun buildDashboard(): View {
+        liveCamera?.stopPreview()
+        liveCamera = null
+        val content = baseContent()
 
         content.addView(title("Robot Tripede"))
+        content.addView(horizontalButtons(
+            button("Live Robot") { openLiveRobot() },
+            button("Memoria") { setContentView(buildMemoryScreen()) },
+            button("Privacy") { setContentView(buildPrivacyScreen()) },
+        ))
+
         content.addView(section("Connessione"))
         bleStatus = row("BLE", "Mock non connesso").also(content::addView)
 
@@ -86,12 +151,261 @@ class MainActivity : ComponentActivity() {
         content.addView(section("Risposta assistente mock"))
         assistantResponse = body("Nessuna risposta ancora").also(content::addView)
 
-        return ScrollView(this).apply {
-            addView(content)
+        return scroll(content)
+    }
+
+    private fun openLiveRobot() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+            liveState = LiveRobotState.CAMERA_READY
+            setContentView(buildLiveRobotScreen())
+        } else {
+            liveState = LiveRobotState.PRIVACY_BLOCKED
+            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
         }
     }
 
+    private fun buildLiveRobotScreen(): View {
+        val snapshot = memoryRepository.loadSnapshot()
+        val content = baseContent()
+        content.addView(title("Live Robot"))
+        content.addView(horizontalButtons(
+            button("Dashboard") { setContentView(buildDashboard()) },
+            button("Memoria") { setContentView(buildMemoryScreen()) },
+            button("Stop live") {
+                currentConversationId?.let { conversationId ->
+                    memoryRepository.finishConversation(conversationId, "Conversazione Live Robot salvata localmente.")
+                }
+                currentConversationId = null
+                liveState = LiveRobotState.IDLE
+                setContentView(buildLiveRobotScreen())
+            },
+        ))
+
+        content.addView(section("Camera locale"))
+        if (liveState == LiveRobotState.PRIVACY_BLOCKED) {
+            content.addView(body("Preview bloccata: autorizza la camera per usarla localmente. Nessuna immagine viene inviata all'esterno."))
+            content.addView(button("Autorizza camera") { cameraPermissionLauncher.launch(Manifest.permission.CAMERA) })
+        } else {
+            liveCamera = CameraPreviewView(this).apply {
+                setBackgroundColor(Color.BLACK)
+                post { startPreview() }
+            }
+            content.addView(liveCamera, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 520))
+        }
+
+        val selectedPerson = snapshot.persons.firstOrNull { it.id == selectedPersonId }
+        content.addView(section("Sessione"))
+        content.addView(body("Stato robot: $liveState"))
+        content.addView(body("Microfono: push-to-talk futuro, non attivo"))
+        content.addView(body("Memoria: ${if (snapshot.privacySettings.consentConversationMemory) "attiva" else "disattivata"}"))
+        content.addView(body("Persona: ${selectedPerson?.displayName ?: "non selezionata"}"))
+
+        content.addView(section("Persona manuale"))
+        val personNameInput = EditText(this).apply { hint = "Nome persona, es. Gabriele" }
+        content.addView(personNameInput)
+        content.addView(horizontalButtons(
+            button("Crea persona") {
+                if (!memoryRepository.loadSnapshot().privacySettings.consentPersonProfile) {
+                    toast("Profilo persona non salvato: consenso disattivato")
+                    return@button
+                }
+                val person = memoryRepository.createPerson(personNameInput.text.toString())
+                selectedPersonId = person.id
+                setContentView(buildLiveRobotScreen())
+            },
+            button("Seleziona ultima") {
+                selectedPersonId = memoryRepository.loadSnapshot().persons.lastOrNull()?.id
+                setContentView(buildLiveRobotScreen())
+            },
+        ))
+
+        content.addView(section("Chat locale mock"))
+        val activeConversationId = ensureConversation(selectedPersonId)
+        val persistedMessages = memoryRepository.loadSnapshot().messages
+            .filter { it.conversationId == activeConversationId }
+            .map { it.sender to it.text }
+        val messages = persistedMessages + liveTransientMessages
+        content.addView(body(messages.joinToString("\n\n") { "${it.first}: ${it.second}" }.ifBlank { "Nessun messaggio in questa sessione" }))
+
+        val liveInput = EditText(this).apply {
+            hint = "Scrivi al robot"
+            minLines = 2
+            setSingleLine(false)
+        }
+        content.addView(liveInput)
+        content.addView(button("Invia a Mock AI") {
+            sendLiveMessage(liveInput.text.toString(), activeConversationId)
+        })
+
+        return scroll(content)
+    }
+
+    private fun ensureConversation(personId: String?): String {
+        if (!memoryRepository.loadSnapshot().privacySettings.consentConversationMemory) {
+            return TRANSIENT_CONVERSATION_ID
+        }
+        currentConversationId?.let { return it }
+        return memoryRepository.startConversation(personId).id.also { currentConversationId = it }
+    }
+
+    private fun sendLiveMessage(text: String, conversationId: String) {
+        val cleanText = text.trim()
+        if (cleanText.isBlank()) {
+            toast("Scrivi un messaggio prima di inviare")
+            return
+        }
+        liveState = LiveRobotState.THINKING
+        val snapshot = memoryRepository.loadSnapshot()
+        val memoryAllowed = snapshot.privacySettings.consentConversationMemory
+        if (memoryAllowed) {
+            memoryRepository.appendMessage(conversationId, "utente", cleanText)
+        } else {
+            liveTransientMessages += "utente" to cleanText
+        }
+        val person = snapshot.persons.firstOrNull { it.id == selectedPersonId }
+        val response = aiConversationClient.respond(
+            AiConversationRequest(
+                userText = cleanText,
+                selectedPersonName = person?.displayName,
+                memorySnapshot = snapshot,
+            ),
+        )
+        if (memoryAllowed) {
+            memoryRepository.appendMessage(conversationId, "robot", response.assistantText)
+            memoryRepository.finishConversation(
+                conversationId,
+                "Ultimo scambio: utente='$cleanText'; robot='${response.assistantText.take(120)}'",
+            )
+        } else {
+            liveTransientMessages += "robot" to response.assistantText
+        }
+        liveState = LiveRobotState.SPEAKING
+        setContentView(buildLiveRobotScreen())
+    }
+
+    private fun buildMemoryScreen(): View {
+        liveCamera?.stopPreview()
+        liveCamera = null
+        val snapshot = memoryRepository.loadSnapshot()
+        val content = baseContent()
+        content.addView(title("Memoria e identita"))
+        content.addView(horizontalButtons(
+            button("Dashboard") { setContentView(buildDashboard()) },
+            button("Live Robot") { openLiveRobot() },
+            button("Privacy") { setContentView(buildPrivacyScreen()) },
+        ))
+
+        content.addView(section("Identita robot"))
+        content.addView(body("Nome: ${snapshot.profile.robotName}"))
+        content.addView(body("robotId: ${snapshot.profile.robotId}"))
+        content.addView(body("Creato: ${formatTime(snapshot.profile.createdAt)}"))
+        content.addView(body("Persone conosciute: ${snapshot.persons.size}"))
+        content.addView(body("Conversazioni: ${snapshot.conversations.size}"))
+        content.addView(body("Messaggi locali: ${snapshot.messages.size}"))
+
+        val robotNameInput = EditText(this).apply {
+            hint = "Nuovo nome robot"
+            setText(snapshot.profile.robotName)
+        }
+        content.addView(robotNameInput)
+        content.addView(button("Cambia nome robot") {
+            memoryRepository.updateRobotName(robotNameInput.text.toString())
+            setContentView(buildMemoryScreen())
+        })
+
+        content.addView(section("Backup locale"))
+        content.addView(body(backupManager.manifestPreview()))
+        content.addView(horizontalButtons(
+            button("Esporta") { exportBackupLauncher.launch(defaultBackupName()) },
+            button("Importa") { importBackupLauncher.launch(arrayOf("application/zip", "application/octet-stream", "*/*")) },
+        ))
+
+        content.addView(section("Persone"))
+        snapshot.persons.forEach { person ->
+            content.addView(body("${person.displayName} - memoria conversazione: ${person.consentConversationMemory}"))
+            content.addView(button("Elimina ${person.displayName}") {
+                if (selectedPersonId == person.id) selectedPersonId = null
+                memoryRepository.deletePerson(person.id)
+                setContentView(buildMemoryScreen())
+            })
+        }
+        if (snapshot.persons.isEmpty()) content.addView(body("Nessuna persona salvata"))
+
+        content.addView(section("Conversazioni"))
+        snapshot.conversations.takeLast(10).reversed().forEach { conversation ->
+            content.addView(body("${formatTime(conversation.startedAt)} - ${conversation.transcriptSummary.ifBlank { "senza sintesi" }}"))
+            content.addView(button("Elimina conversazione") {
+                memoryRepository.deleteConversation(conversation.id)
+                setContentView(buildMemoryScreen())
+            })
+        }
+        if (snapshot.conversations.isEmpty()) content.addView(body("Nessuna conversazione salvata"))
+
+        content.addView(section("Azioni distruttive locali"))
+        content.addView(horizontalButtons(
+            button("Cancella memoria") {
+                memoryRepository.clearMemory()
+                selectedPersonId = null
+                currentConversationId = null
+                setContentView(buildMemoryScreen())
+            },
+            button("Elimina identita") {
+                memoryRepository.deleteIdentity()
+                selectedPersonId = null
+                currentConversationId = null
+                setContentView(buildMemoryScreen())
+            },
+        ))
+
+        return scroll(content)
+    }
+
+    private fun buildPrivacyScreen(): View {
+        liveCamera?.stopPreview()
+        liveCamera = null
+        val settings = memoryRepository.loadSnapshot().privacySettings
+        val content = baseContent()
+        content.addView(title("Privacy"))
+        content.addView(horizontalButtons(
+            button("Dashboard") { setContentView(buildDashboard()) },
+            button("Live Robot") { openLiveRobot() },
+            button("Memoria") { setContentView(buildMemoryScreen()) },
+        ))
+        content.addView(body("Camera solo preview locale. Microfono, riconoscimento facciale, riconoscimento vocale e invio immagini all'AI restano disattivati in questa fase."))
+
+        val conversationMemory = check("Memoria conversazioni", settings.consentConversationMemory).also(content::addView)
+        val personProfile = check("Profili persona manuali", settings.consentPersonProfile).also(content::addView)
+        val faceRecognition = check("Riconoscimento facciale", settings.consentFaceRecognition).also(content::addView)
+        val voiceRecognition = check("Riconoscimento vocale identificativo", settings.consentVoiceRecognition).also(content::addView)
+        val sendImages = check("Invio immagini all'AI", settings.consentSendImagesToAI).also(content::addView)
+        val saveFullTranscript = check("Salva transcript completo", settings.consentSaveFullTranscript).also(content::addView)
+        val saveAudio = check("Salva audio grezzo", settings.consentSaveAudio).also(content::addView)
+
+        content.addView(button("Salva privacy") {
+            memoryRepository.savePrivacySettings(
+                PrivacySettings(
+                    consentConversationMemory = conversationMemory.isChecked,
+                    consentPersonProfile = personProfile.isChecked,
+                    consentFaceRecognition = false,
+                    consentVoiceRecognition = false,
+                    consentSendImagesToAI = false,
+                    consentSaveFullTranscript = saveFullTranscript.isChecked,
+                    consentSaveAudio = false,
+                ),
+            )
+            faceRecognition.isChecked = false
+            voiceRecognition.isChecked = false
+            sendImages.isChecked = false
+            saveAudio.isChecked = false
+            toast("Privacy salvata: funzioni biometriche e invio immagini restano bloccati")
+            setContentView(buildPrivacyScreen())
+        })
+
+        return scroll(content)
+    }
+
     private fun render(state: RobotUiState) {
+        if (!::bleStatus.isInitialized) return
         bleStatus.text = state.bleState
         stopStatus.text = if (state.telemetry.stop) "ATTIVO" else "Non attivo"
         stopStatus.setTextColor(if (state.telemetry.stop) Color.rgb(185, 28, 28) else Color.rgb(22, 101, 52))
@@ -100,6 +414,12 @@ class MainActivity : ComponentActivity() {
         telemetry.text = state.telemetry.toDisplayText()
         assistantResponse.text = state.assistantResponse
         validationStatus.text = state.validationMessage
+    }
+
+    private fun baseContent() = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(32)
+        setBackgroundColor(Color.rgb(247, 248, 250))
     }
 
     private fun title(text: String) = TextView(this).apply {
@@ -129,6 +449,13 @@ class MainActivity : ComponentActivity() {
         setPadding(0, 6, 0, 6)
     }
 
+    private fun check(label: String, checked: Boolean) = CheckBox(this).apply {
+        text = label
+        isChecked = checked
+        textSize = 15f
+        setPadding(0, 6, 0, 6)
+    }
+
     private fun button(label: String, action: () -> Unit) = Button(this).apply {
         text = label
         setOnClickListener { action() }
@@ -140,5 +467,26 @@ class MainActivity : ComponentActivity() {
         buttons.forEach { button ->
             addView(button, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         }
+    }
+
+    private fun scroll(content: LinearLayout) = ScrollView(this).apply {
+        addView(content)
+    }
+
+    private fun toast(message: String) {
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+    }
+
+    private fun defaultBackupName(): String {
+        val date = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+        return "robot-tripede-$date.robotbackup"
+    }
+
+    private fun formatTime(value: Long): String {
+        return SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date(value))
+    }
+
+    companion object {
+        private const val TRANSIENT_CONVERSATION_ID = "transient-live-session"
     }
 }
