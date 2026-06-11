@@ -1,6 +1,7 @@
 package com.robottripede.app
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.os.Bundle
@@ -23,6 +24,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.robottripede.app.data.ai.MockAiConversationClient
 import com.robottripede.app.data.camera.CameraPreviewView
+import com.robottripede.app.data.diagnostics.DiagnosticStore
 import com.robottripede.app.data.local.LocalRobotMemoryRepository
 import com.robottripede.app.data.local.RobotIdentityBackupManager
 import com.robottripede.app.data.model.LedColor
@@ -61,6 +63,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var commandInput: EditText
 
     private val cameraPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        DiagnosticStore.recordEvent(this, "camera_permission_result", "granted=$granted")
         if (granted) {
             liveState = LiveRobotState.CAMERA_READY
             livePreviewEnabled = false
@@ -76,6 +79,7 @@ class MainActivity : ComponentActivity() {
     private val exportBackupLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
         if (uri != null) {
             contentResolver.openOutputStream(uri)?.use(backupManager::exportBackup)
+            DiagnosticStore.recordEvent(this, "backup_exported", uri.toString())
             toast("Backup .robotbackup esportato")
             setContentView(buildMemoryScreen())
         }
@@ -84,6 +88,7 @@ class MainActivity : ComponentActivity() {
     private val importBackupLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
             contentResolver.openInputStream(uri)?.use(backupManager::importBackup)
+            DiagnosticStore.recordEvent(this, "backup_imported", uri.toString())
             toast("Backup importato in modalita replace")
             setContentView(buildMemoryScreen())
         }
@@ -91,6 +96,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        DiagnosticStore.install(this)
+        DiagnosticStore.recordEvent(this, "app_started")
         memoryRepository = LocalRobotMemoryRepository(this)
         backupManager = RobotIdentityBackupManager(memoryRepository)
         setContentView(buildDashboard())
@@ -119,6 +126,7 @@ class MainActivity : ComponentActivity() {
             button("Memoria") { setContentView(buildMemoryScreen()) },
             button("Privacy") { setContentView(buildPrivacyScreen()) },
         ))
+        content.addView(button("Diagnostica") { setContentView(buildDiagnosticsScreen()) })
 
         content.addView(section("Connessione"))
         bleStatus = row("BLE", "Mock non connesso").also(content::addView)
@@ -160,6 +168,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun openLiveRobot() {
+        DiagnosticStore.recordEvent(this, "open_live_robot")
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             liveState = LiveRobotState.CAMERA_READY
             livePreviewEnabled = false
@@ -180,6 +189,7 @@ class MainActivity : ComponentActivity() {
             button("Dashboard") { setContentView(buildDashboard()) },
             button("Memoria") { setContentView(buildMemoryScreen()) },
             button("Stop live") {
+                DiagnosticStore.recordEvent(this, "stop_live_robot")
                 currentConversationId?.let { conversationId ->
                     memoryRepository.finishConversation(conversationId, "Conversazione Live Robot salvata localmente.")
                 }
@@ -192,10 +202,14 @@ class MainActivity : ComponentActivity() {
         content.addView(section("Camera locale"))
         if (liveState == LiveRobotState.PRIVACY_BLOCKED) {
             content.addView(body("Preview bloccata: autorizza la camera per usarla localmente. Nessuna immagine viene inviata all'esterno."))
-            content.addView(button("Autorizza camera") { cameraPermissionLauncher.launch(Manifest.permission.CAMERA) })
+            content.addView(button("Autorizza camera") {
+                DiagnosticStore.recordEvent(this, "request_camera_permission")
+                cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+            })
         } else if (!livePreviewEnabled) {
             content.addView(body(liveCameraMessage ?: "Preview camera spenta. Nessuna immagine viene inviata all'esterno."))
             content.addView(button("Avvia preview camera") {
+                DiagnosticStore.recordEvent(this, "start_camera_preview_tapped")
                 if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
                     livePreviewEnabled = true
                     liveState = LiveRobotState.CAMERA_READY
@@ -212,6 +226,7 @@ class MainActivity : ComponentActivity() {
             }
             liveCamera = CameraPreviewView(this) { message ->
                 runOnUiThread {
+                    DiagnosticStore.recordEvent(this, "camera_preview_error", message)
                     liveState = LiveRobotState.ERROR
                     livePreviewEnabled = false
                     liveCameraMessage = "Preview camera non disponibile: $message"
@@ -233,6 +248,7 @@ class MainActivity : ComponentActivity() {
         content.addView(personNameInput)
         content.addView(horizontalButtons(
             button("Crea persona") {
+                DiagnosticStore.recordEvent(this, "create_person_tapped")
                 if (!memoryRepository.loadSnapshot().privacySettings.consentPersonProfile) {
                     toast("Profilo persona non salvato: consenso disattivato")
                     return@button
@@ -242,6 +258,7 @@ class MainActivity : ComponentActivity() {
                 showLiveRobotScreen()
             },
             button("Seleziona ultima") {
+                DiagnosticStore.recordEvent(this, "select_last_person")
                 selectedPersonId = memoryRepository.loadSnapshot().persons.lastOrNull()?.id
                 showLiveRobotScreen()
             },
@@ -262,6 +279,7 @@ class MainActivity : ComponentActivity() {
         }
         content.addView(liveInput)
         content.addView(button("Invia a Mock AI") {
+            DiagnosticStore.recordEvent(this, "send_live_message")
             sendLiveMessage(liveInput.text.toString(), activeConversationId)
         })
 
@@ -315,6 +333,8 @@ class MainActivity : ComponentActivity() {
         try {
             setContentView(buildLiveRobotScreen())
         } catch (exception: Exception) {
+            DiagnosticStore.recordEvent(this, "live_robot_render_error", exception.message.orEmpty())
+            DiagnosticStore.saveCrash(this, "LiveRobotScreen", exception)
             liveCamera?.stopPreview()
             liveCamera = null
             livePreviewEnabled = false
@@ -333,12 +353,46 @@ class MainActivity : ComponentActivity() {
         content.addView(horizontalButtons(
             button("Dashboard") { setContentView(buildDashboard()) },
             button("Riprova senza camera") {
+                DiagnosticStore.recordEvent(this, "retry_live_without_camera")
                 livePreviewEnabled = false
                 liveCameraMessage = "Riprovo con preview camera spenta."
                 showLiveRobotScreen()
             },
         ))
         return scroll(content)
+    }
+
+    private fun buildDiagnosticsScreen(): View {
+        liveCamera?.stopPreview()
+        liveCamera = null
+        livePreviewEnabled = false
+        val content = baseContent()
+        content.addView(title("Diagnostica"))
+        content.addView(horizontalButtons(
+            button("Dashboard") { setContentView(buildDashboard()) },
+            button("Condividi report") { shareDiagnosticReport() },
+            button("Cancella") {
+                DiagnosticStore.clear(this)
+                DiagnosticStore.recordEvent(this, "diagnostics_cleared")
+                setContentView(buildDiagnosticsScreen())
+            },
+        ))
+        content.addView(section("Ultimo crash"))
+        content.addView(body(DiagnosticStore.lastCrash(this)))
+        content.addView(section("Eventi recenti"))
+        content.addView(body(DiagnosticStore.recentEvents(this)))
+        return scroll(content)
+    }
+
+    private fun shareDiagnosticReport() {
+        DiagnosticStore.recordEvent(this, "share_diagnostic_report")
+        val report = DiagnosticStore.buildFullReport(this)
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_SUBJECT, "Robot Tripede diagnostic report")
+            putExtra(Intent.EXTRA_TEXT, report)
+        }
+        startActivity(Intent.createChooser(intent, "Condividi report diagnostico"))
     }
 
     private fun buildMemoryScreen(): View {
