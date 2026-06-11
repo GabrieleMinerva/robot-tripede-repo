@@ -47,6 +47,7 @@ class MainActivity : ComponentActivity() {
     private var currentConversationId: String? = null
     private var liveCamera: CameraPreviewView? = null
     private var liveState = LiveRobotState.IDLE
+    private var liveCameraMessage: String? = null
     private val liveTransientMessages = mutableListOf<Pair<String, String>>()
 
     private lateinit var bleStatus: TextView
@@ -157,6 +158,7 @@ class MainActivity : ComponentActivity() {
     private fun openLiveRobot() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             liveState = LiveRobotState.CAMERA_READY
+            liveCameraMessage = null
             setContentView(buildLiveRobotScreen())
         } else {
             liveState = LiveRobotState.PRIVACY_BLOCKED
@@ -186,7 +188,16 @@ class MainActivity : ComponentActivity() {
             content.addView(body("Preview bloccata: autorizza la camera per usarla localmente. Nessuna immagine viene inviata all'esterno."))
             content.addView(button("Autorizza camera") { cameraPermissionLauncher.launch(Manifest.permission.CAMERA) })
         } else {
-            liveCamera = CameraPreviewView(this).apply {
+            liveCameraMessage?.let { message ->
+                content.addView(body(message))
+            }
+            liveCamera = CameraPreviewView(this) { message ->
+                runOnUiThread {
+                    liveState = LiveRobotState.ERROR
+                    liveCameraMessage = "Preview camera non disponibile: $message"
+                    toast("Preview camera non disponibile")
+                }
+            }.apply {
                 setBackgroundColor(Color.BLACK)
                 post { startPreview() }
             }
